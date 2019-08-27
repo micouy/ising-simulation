@@ -6,10 +6,10 @@ edition = "2018"
 
 [dependencies]
 ising_lib = { path = "../ising-lib" }
-rand = "*"
-chrono = "*"
-pbr = "*"
-serde_json = "*"
-rayon = "*"
-ndarray = "*"
-indoc = "*"
+rand = { version = "0.7.0", features = ["small_rng"] }
+chrono = "0.4"
+pbr = "1.0"
+serde_json = "1.0"
+rayon = "1.1"
+ndarray = "0.12"
+indoc = "0.3"

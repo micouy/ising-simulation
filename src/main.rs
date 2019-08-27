@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 
-use ::chrono::prelude::*;
-use ::ndarray::prelude::*;
-use ::pbr::ProgressBar;
-use ::rand::{distributions::Normal, prelude::*};
-use ::rayon::prelude::*;
-use ::serde_json::{json, to_string_pretty};
+use chrono::prelude::*;
+use ndarray::prelude::*;
+use pbr::ProgressBar;
+use rand::{distributions::Normal, prelude::*};
+use rayon::prelude::*;
+use serde_json::{json, to_string_pretty};
 use indoc::indoc;
 
 use std::{
