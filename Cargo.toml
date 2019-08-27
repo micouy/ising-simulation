@@ -1,0 +1,15 @@
+[package]
+name = "ising-simulation"
+version = "0.1.0"
+authors = ["micouy <szpontaniczny@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+ising_lib = { path = "../ising-lib" }
+rand = "*"
+chrono = "*"
+pbr = "*"
+serde_json = "*"
+rayon = "*"
+ndarray = "*"
+indoc = "*"
