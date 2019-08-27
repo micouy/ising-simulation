@@ -125,7 +125,7 @@ fn run(params: Params, pb_tx: Sender<()>) -> (String, String) {
         params.steps_before_sleep.0 as f64,
         params.steps_before_sleep.1 as f64,
     );
-    let mut distr_sample = rng.sample_iter(&distr);
+    let mut distr_sample = rng.clone().sample_iter(&distr);
     let mut lattice = Lattice::new((params.lattice_size, params.lattice_size));
 
     let h = Array2::from_shape_fn(
