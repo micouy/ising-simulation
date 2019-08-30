@@ -1,13 +1,13 @@
 #![allow(non_snake_case)]
 
 use chrono::prelude::*;
+use indoc::indoc;
 use ndarray::prelude::*;
 use pbr::ProgressBar;
 use rand::prelude::*;
 use rand_distr::Normal;
 use rayon::prelude::*;
 use serde_json::{json, to_string_pretty};
-use indoc::indoc;
 
 use std::{
     env::args,
@@ -87,7 +87,7 @@ struct Record {
     X: f64,
 }
 
-fn compose_results(records: &[Record], params: Params) -> String {
+fn compose_results(records: &[Record], params: &Params) -> String {
     let records = records
         .iter()
         .map(|r| {
@@ -120,102 +120,142 @@ fn compose_file_name() -> String {
     format!("results-{}-{}.txt", now, id)
 }
 
-fn run(params: Params, pb_tx: Sender<()>) -> (String, String) {
-    let mut rng = SmallRng::from_entropy();
+fn create_activity_lattice(params: &Params) -> Array2<usize> {
     let distr = Normal::new(
         params.steps_before_sleep.0 as f64,
         params.steps_before_sleep.1 as f64,
-    ).unwrap();
-    let mut distr_sample = distr.sample_iter(rng.clone());
-    let mut lattice = Lattice::new((params.lattice_size, params.lattice_size));
+    )
+    .unwrap();
+    let mut distr_sample = distr.sample_iter(SmallRng::from_entropy());
 
-    let h = Array2::from_shape_fn(
-        (params.lattice_size, params.lattice_size),
-        |_| distr_sample.next().unwrap() as usize,
-    );
+    Array2::from_shape_fn((params.lattice_size, params.lattice_size), |_| {
+        distr_sample.next().unwrap() as usize
+    })
+}
 
-    let map_activity_to_h = |h: &Array2<usize>, step| {
-        h.map(|steps_before_sleep| {
-            // is the node still active?
-            if *steps_before_sleep >= step {
-                1.0
-            } else if step - *steps_before_sleep <= A {
-                1.0 - ((step - *steps_before_sleep) as f64 / A as f64)
-                    .powi(POWER)
-            } else {
-                0.0
-            }
-        })
-    };
-
-    let measure_E_diff = |lattice: &Lattice<_>, ix, h: &Array2<f64>| -> f64 {
-        2.0 * f64::from(lattice.inner()[ix])
-            * (params.alpha * lattice.measure_I()
-                + (1.0 - params.alpha) * h[ix])
-    };
-
-    let mut attempt_flip = |lattice: &mut Lattice<_>, h, step| -> bool {
-        let ix = lattice.gen_random_index();
-        let h = map_activity_to_h(h, step);
-        let E_diff = measure_E_diff(&lattice, ix, &h);
-        let probability = calc_flip_probability(E_diff, params.T);
-
-        if probability > rng.gen() {
-            lattice.flip_spin(ix);
-
-            true // the flip has already occured
+fn map_activity_to_magnetization(
+    activity_lattice: &Array2<usize>,
+    step: usize,
+) -> Array2<f64> {
+    activity_lattice.map(|steps_before_sleep| {
+        // is the node still active?
+        if *steps_before_sleep >= step {
+            1.0
+        } else if step - *steps_before_sleep <= A {
+            1.0 - ((step - *steps_before_sleep) as f64 / A as f64).powi(POWER)
         } else {
-            false // the flip has not occured yet
+            0.0
         }
-    };
+    })
+}
+fn measure_E_diff(
+    lattice: &Lattice,
+    ix: [usize; 2],
+    h: &Array2<f64>,
+    params: &Params,
+) -> f64 {
+    2.0 * f64::from(lattice.inner()[ix])
+        * (params.alpha * lattice.measure_I() + (1.0 - params.alpha) * h[ix])
+}
+
+fn attempt_flip<R: RngCore>(
+    lattice: &mut Lattice,
+    activity_lattice: &Array2<usize>,
+    rng: &mut R,
+    step: usize,
+    params: &Params,
+) -> bool {
+    let ix = lattice.gen_random_index(rng);
+    let magnetic_field = map_activity_to_magnetization(activity_lattice, step);
+    let E_diff = measure_E_diff(&lattice, ix, &magnetic_field, &params);
+    let probability = calc_flip_probability(E_diff, params.T);
+
+    if probability > rng.gen() {
+        lattice.flip_spin(ix);
+
+        true // the flip has occured
+    } else {
+        false // the flip has not occured
+    }
+}
+
+fn print_record_as_csv(record: &Record) {
+    println!(
+        "{}",
+        [
+            record.dE.to_string(),
+            record.I.to_string(),
+            record.X.to_string()
+        ]
+        .join(",")
+    );
+}
+
+fn simulate_step<R: RngCore>(
+    lattice: &mut Lattice,
+    activity_lattice: &Array2<usize>,
+    rng: &mut R,
+    step: usize,
+    pb_tx: &Sender<()>,
+    params: &Params,
+) -> Record {
+    let (Es, Is) = (0..params.measurements_per_step)
+        .map(|_| {
+            (0..params.flips_per_measurement).for_each(|_| {
+                let _flipped = (0..params.attempts_per_flip).any(|_| {
+                    attempt_flip(lattice, &activity_lattice, rng, step, &params)
+                });
+            });
+
+            (lattice.measure_E(), lattice.measure_I())
+        })
+        .inspect(|_| pb_tx.send(()).unwrap()) // send signal to progress bar after every measurement
+        .unzip::<_, _, Vec<_>, Vec<_>>();
+
+    let dE = calc_dE(&Es, params.T);
+    let I = calc_I(&Is);
+    let X = calc_X(&Es);
+
+    Record { step, dE, I, X }
+}
+
+fn run(params: &Params, pb_tx: Sender<()>) -> Vec<Record> {
+    let mut rng = SmallRng::from_entropy();
+    let mut lattice = Lattice::new([params.lattice_size; 2]);
+    let activity_lattice = create_activity_lattice(params);
 
     // "cool" the lattice to its natural state
     (0..params.flips_to_skip).for_each(|_| {
-        (0..params.attempts_per_flip)
-            .map(|_| attempt_flip(&mut lattice, &h, 0))
-            .take_while(|already_flipped| !already_flipped)
-            .for_each(|_| ());
+        let _flipped = (0..params.attempts_per_flip).any(|_| {
+            attempt_flip(&mut lattice, &activity_lattice, &mut rng, 0, params)
+        });
     });
 
     let mut records: Vec<Record> = (0..params.steps)
         .map(|step| {
-            let (Es, Is) = (0..params.measurements_per_step)
-                .map(|_| {
-                    (0..params.flips_per_measurement).for_each(|_| {
-                        (0..params.attempts_per_flip)
-                            .map(|_| attempt_flip(&mut lattice, &h, step))
-                            .take_while(|already_flipped| !already_flipped)
-                            .for_each(|_| ()); // evaluate the iterator
-                    });
-
-                    let _ = pb_tx.send(());
-
-                    (lattice.measure_E(), lattice.measure_I())
-                })
-                .unzip::<_, _, Vec<_>, Vec<_>>();
-
-            let dE = calc_dE(&Es, params.T);
-            let I = calc_I(&Is);
-            let X = calc_X(&Es);
-
-            // println!("{}", [dE.to_string(), I.to_string(),
-            // X.to_string()].connect(","));
-
-            Record { step, dE, I, X }
+            simulate_step(
+                &mut lattice,
+                &activity_lattice,
+                &mut rng,
+                step,
+                &pb_tx,
+                params,
+            )
         })
+        // .inspect(print_record_as_csv)
         .collect();
-
-    let file_name = compose_file_name();
     records.sort_by_key(|r| r.step);
-    let results = compose_results(&records, params);
 
-    (results, file_name)
+    records
 }
 
 fn main() {
     let dir_name = match args().nth(1) {
         None => {
-            println!("{}", indoc!("
+            println!(
+                "{}",
+                indoc!(
+                    "
                 Ising Model simulation
 
                 USAGE:
@@ -223,7 +263,9 @@ fn main() {
 
                 ARGS:
                     <DIR> - where to save the results to
-            "));
+            "
+                )
+            );
 
             return;
         }
@@ -278,14 +320,16 @@ fn main() {
                 TEMPERATURE,
             );
 
-            run(params, pb_tx)
+            let records = run(&params, pb_tx);
+
+            (compose_results(&records, &params), compose_file_name())
         })
         .collect::<Vec<(String, String)>>();
 
     let _ = handle.join();
 
-    for (result, file_name) in results {
+    results.into_iter().for_each(|(results, file_name)| {
         let path = format!("{}/{}", dir_name, file_name);
-        fs::write(path, result.as_bytes()).unwrap();
-    }
+        fs::write(path, results.as_bytes()).unwrap();
+    })
 }
