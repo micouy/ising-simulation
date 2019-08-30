@@ -3,7 +3,8 @@
 use chrono::prelude::*;
 use ndarray::prelude::*;
 use pbr::ProgressBar;
-use rand::{distributions::Normal, prelude::*};
+use rand::prelude::*;
+use rand_distr::Normal;
 use rayon::prelude::*;
 use serde_json::{json, to_string_pretty};
 use indoc::indoc;
@@ -124,8 +125,8 @@ fn run(params: Params, pb_tx: Sender<()>) -> (String, String) {
     let distr = Normal::new(
         params.steps_before_sleep.0 as f64,
         params.steps_before_sleep.1 as f64,
-    );
-    let mut distr_sample = rng.clone().sample_iter(&distr);
+    ).unwrap();
+    let mut distr_sample = distr.sample_iter(rng.clone());
     let mut lattice = Lattice::new((params.lattice_size, params.lattice_size));
 
     let h = Array2::from_shape_fn(
